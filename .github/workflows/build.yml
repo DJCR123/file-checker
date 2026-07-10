@@ -33,11 +33,13 @@ jobs:
           choco install tesseract-lang -y
           & "C:\Program Files\Tesseract-OCR\tesseract.exe" --list-langs
 
-      - name: 安装 poppler
+      - name: 安装 poppler（不指定版本，安装最新）
         shell: pwsh
         run: |
-          choco install poppler --version=24.08.0 -y
-          & "C:\ProgramData\chocolatey\lib\poppler\tools\Library\bin\pdftoppm.exe" -v
+          choco install poppler -y
+          # 验证
+          $popplerBin = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\poppler\tools\Library\bin" -Filter pdftoppm.exe -Recurse | Select-Object -First 1
+          if ($popplerBin) { & $popplerBin.FullName -v } else { Write-Error "pdftoppm not found" }
 
       # ----- 提取 UCRT 运行库（从微软 VC++ Redist）-----
       - name: 提取 UCRT DLL（用于 Win7 离线运行）
@@ -66,7 +68,9 @@ jobs:
           set TESSERACT_DIR=C:\Program Files\Tesseract-OCR
           if exist tessdata rmdir /s /q tessdata
           xcopy /E /I "%TESSERACT_DIR%\tessdata" tessdata
-          set POPPLER_BIN=C:\ProgramData\chocolatey\lib\poppler\tools\Library\bin
+
+          :: 动态获取 poppler bin 目录
+          for /d %%i in ("C:\ProgramData\chocolatey\lib\poppler\tools\Library") do set POPPLER_BIN=%%i\bin
 
           pyinstaller --onefile --name FileCheckerGUI --windowed ^
             --add-binary "antiword_bin\antiword.exe;antiword_bin" ^
@@ -93,23 +97,28 @@ jobs:
           path: dist\FileCheckerGUI.exe
 
   # ============================================================
-  # Linux x86_64 打包（低 glibc）
+  # Linux x86_64 打包（低 glibc，兼容老系统）
   # ============================================================
   build-linux-amd64:
-    runs-on: ubuntu-20.04                     # glibc 2.31
+    runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:18.04                       # glibc 2.27
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置 Python 3.9（兼容老系统）
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
+      - name: 修复 Ubuntu 18.04 软件源（切换到 old-releases）
+        run: |
+          cat > /etc/apt/sources.list <<EOF
+          deb http://old-releases.ubuntu.com/ubuntu bionic main restricted universe multiverse
+          deb http://old-releases.ubuntu.com/ubuntu bionic-updates main restricted universe multiverse
+          deb http://old-releases.ubuntu.com/ubuntu bionic-security main restricted universe multiverse
+          EOF
 
       - name: 安装系统依赖
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk antiword tesseract-ocr tesseract-ocr-chi-sim poppler-utils
+          apt-get update
+          apt-get install -y python3 python3-pip python3-tk antiword tesseract-ocr tesseract-ocr-chi-sim poppler-utils
 
       - name: 准备 antiword 映射文件
         run: |
@@ -119,8 +128,8 @@ jobs:
 
       - name: 安装 Python 依赖
         run: |
-          pip install -r requirements.txt
-          pip install pyinstaller xlrd olefile pytesseract pdf2image Pillow
+          pip3 install -r requirements.txt
+          pip3 install pyinstaller xlrd olefile pytesseract pdf2image Pillow
 
       - name: 打包 Linux x86_64 版
         run: |
@@ -152,12 +161,20 @@ jobs:
   build-linux-arm64:
     runs-on: ubuntu-22.04-arm
     container:
-      image: debian:buster-slim              # glibc 2.28，兼容麒麟 V10
+      image: ubuntu:18.04                       # glibc 2.27，兼容麒麟 V10
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装系统依赖（Debian Buster）
+      - name: 修复 Ubuntu 18.04 软件源（切换到 old-releases）
+        run: |
+          cat > /etc/apt/sources.list <<EOF
+          deb http://old-releases.ubuntu.com/ubuntu bionic main restricted universe multiverse
+          deb http://old-releases.ubuntu.com/ubuntu bionic-updates main restricted universe multiverse
+          deb http://old-releases.ubuntu.com/ubuntu bionic-security main restricted universe multiverse
+          EOF
+
+      - name: 安装系统依赖
         run: |
           apt-get update
           apt-get install -y python3 python3-pip python3-tk antiword tesseract-ocr tesseract-ocr-chi-sim poppler-utils
