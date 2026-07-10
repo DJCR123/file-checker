@@ -1,0 +1,188 @@
+name: Build Multi-Platform
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  # ==================== Windows 打包 ====================
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 Tesseract OCR（系统级）
+        shell: pwsh
+        run: |
+          # 下载 UB Mannheim 的 Tesseract 安装包（含中文语言包）
+          Invoke-WebRequest -Uri "https://github.com/UB-Mannheim/tesseract/releases/download/v5.3.3/tesseract-ocr-w64-setup-5.3.3.20231005.exe" -OutFile "$env:TEMP\tesseract-installer.exe"
+          # 静默安装
+          Start-Process -FilePath "$env:TEMP\tesseract-installer.exe" -ArgumentList "/S" -Wait
+          # 验证
+          & "C:\Program Files\Tesseract-OCR\tesseract.exe" --list-langs
+
+      - name: 安装 poppler（PDF 转图片）
+        shell: pwsh
+        run: |
+          # 使用 choco 安装 poppler
+          choco install poppler --version=24.08.0 -y
+          # 验证
+          & "C:\ProgramData\chocolatey\lib\poppler\tools\Library\bin\pdftoppm.exe" -v
+
+      - name: 准备 antiword 映射文件（你的项目自带 antiword_bin，直接抄到工作目录）
+        shell: cmd
+        run: |
+          if not exist antiword_bin mkdir antiword_bin
+          # 如果你的 antiword_bin 不在仓库根目录，需要根据实际情况调整路径
+
+      - name: 安装 Python 依赖
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller xlrd olefile pytesseract pdf2image Pillow
+
+      - name: 打包 Windows 版
+        shell: cmd
+        run: |
+          :: 收集 Tesseract 及其 tessdata
+          set TESSERACT_DIR=C:\Program Files\Tesseract-OCR
+          xcopy /E /I "%TESSERACT_DIR%\tessdata" tessdata
+          :: 收集 poppler 的 bin 目录
+          set POPPLER_BIN=C:\ProgramData\chocolatey\lib\poppler\tools\Library\bin
+
+          pyinstaller --onefile --name FileCheckerGUI --windowed ^
+            --add-data "dictionary.txt;." ^
+            --add-binary "antiword_bin\antiword.exe;antiword_bin" ^
+            --add-data "antiword_bin\*.txt;antiword_bin" ^
+            --add-data "antiword_bin\fontnames;antiword_bin" ^
+            --add-data "antiword_bin\fontnames.rus;antiword_bin" ^
+            --add-data "antiword_bin\Unicode01;antiword_bin" ^
+            --add-data "antiword_bin\Unicode15;antiword_bin" ^
+            --add-data "antiword_bin\Default;antiword_bin" ^
+            --add-binary "%TESSERACT_DIR%\tesseract.exe;tesseract" ^
+            --add-data "tessdata;tessdata" ^
+            --add-binary "%POPPLER_BIN%\pdftoppm.exe;." ^
+            --add-binary "%POPPLER_BIN%\pdfinfo.exe;." ^
+            --add-binary "%POPPLER_BIN%\pdftotext.exe;." ^
+            --add-binary "%POPPLER_BIN%\libpoppler*.dll;." ^
+            --add-binary "%POPPLER_BIN%\*.dll;." ^
+            --hidden-import tkinter ^
+            file_checker_gui.py
+
+      - name: 上传 Windows 产物
+        uses: actions/upload-artifact@v5
+        with:
+          name: FileCheckerGUI-Windows
+          path: dist\FileCheckerGUI.exe
+
+  # ==================== Linux x86_64 打包 ====================
+  build-linux-amd64:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk antiword tesseract-ocr tesseract-ocr-chi-sim poppler-utils
+
+      - name: 准备 antiword 映射文件
+        run: |
+          mkdir -p antiword_bin
+          cp /usr/bin/antiword antiword_bin/
+          cp -r /usr/share/antiword/* antiword_bin/
+
+      - name: 安装 Python 依赖
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller xlrd olefile pytesseract pdf2image Pillow
+
+      - name: 打包 Linux x86_64 版
+        run: |
+          cd ${{ github.workspace }}
+          PYI_ARGS="--onefile --name FileCheckerGUI --windowed"
+          PYI_ARGS="$PYI_ARGS --add-data dictionary.txt:."
+          PYI_ARGS="$PYI_ARGS --add-binary antiword_bin/antiword:antiword_bin"
+          for f in antiword_bin/*.txt antiword_bin/fontnames antiword_bin/fontnames.rus \
+                   antiword_bin/Unicode01 antiword_bin/Unicode15 antiword_bin/Default; do
+            PYI_ARGS="$PYI_ARGS --add-data $f:antiword_bin"
+          done
+          # 添加 Tesseract 和 tessdata
+          PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/tesseract:."
+          PYI_ARGS="$PYI_ARGS --add-data /usr/share/tesseract-ocr/4.00/tessdata:tessdata"
+          # 添加 poppler 工具
+          PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/pdftoppm:."
+          PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/pdfinfo:."
+          PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/pdftotext:."
+          PYI_ARGS="$PYI_ARGS --hidden-import tkinter file_checker_gui.py"
+          pyinstaller $PYI_ARGS
+
+      - name: 上传 Linux x86_64 产物
+        uses: actions/upload-artifact@v5
+        with:
+          name: FileCheckerGUI-Linux-x86_64
+          path: dist/FileCheckerGUI
+
+  # ==================== Linux ARM64 打包 ====================
+  build-linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk antiword tesseract-ocr tesseract-ocr-chi-sim poppler-utils
+
+      - name: 准备 antiword 映射文件
+        run: |
+          mkdir -p antiword_bin
+          cp /usr/bin/antiword antiword_bin/
+          cp -r /usr/share/antiword/* antiword_bin/
+
+      - name: 安装 Python 依赖
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller xlrd olefile pytesseract pdf2image Pillow
+
+      - name: 打包 Linux ARM64 版
+        run: |
+          cd ${{ github.workspace }}
+          PYI_ARGS="--onefile --name FileCheckerGUI --windowed"
+          PYI_ARGS="$PYI_ARGS --add-data dictionary.txt:."
+          PYI_ARGS="$PYI_ARGS --add-binary antiword_bin/antiword:antiword_bin"
+          for f in antiword_bin/*.txt antiword_bin/fontnames antiword_bin/fontnames.rus \
+                   antiword_bin/Unicode01 antiword_bin/Unicode15 antiword_bin/Default; do
+            PYI_ARGS="$PYI_ARGS --add-data $f:antiword_bin"
+          done
+          PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/tesseract:."
+          PYI_ARGS="$PYI_ARGS --add-data /usr/share/tesseract-ocr/4.00/tessdata:tessdata"
+          PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/pdftoppm:."
+          PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/pdfinfo:."
+          PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/pdftotext:."
+          PYI_ARGS="$PYI_ARGS --hidden-import tkinter file_checker_gui.py"
+          pyinstaller $PYI_ARGS
+
+      - name: 上传 Linux ARM64 产物
+        uses: actions/upload-artifact@v5
+        with:
+          name: FileCheckerGUI-Linux-ARM64
+          path: dist/FileCheckerGUI

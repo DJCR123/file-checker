@@ -1,0 +1,5 @@
+__pycache__/ 
+FileChecker.spec 
+config.json 
+build/ 
+dist/ 
