@@ -1,4 +1,4 @@
-name: Build Multi-Platform
+name: Build Multi-Platform (Win7+ / Low glibc)
 
 on:
   push:
@@ -6,58 +6,69 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ==================== Windows 打包 ====================
+  # ============================================================
+  # Windows 打包 —— 兼容 Win7/8/10/11（内置 UCRT）
+  # ============================================================
   build-windows:
     runs-on: windows-latest
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置 Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: 安装 Tesseract OCR（系统级）
+      # ----- 安装 Python 3.8.10（最后一个官方支持 Win7 的版本）-----
+      - name: 安装 Python 3.8.10
         shell: pwsh
         run: |
-          # 下载 UB Mannheim 的 Tesseract 安装包（含中文语言包）
-          Invoke-WebRequest -Uri "https://github.com/UB-Mannheim/tesseract/releases/download/v5.3.3/tesseract-ocr-w64-setup-5.3.3.20231005.exe" -OutFile "$env:TEMP\tesseract-installer.exe"
-          # 静默安装
-          Start-Process -FilePath "$env:TEMP\tesseract-installer.exe" -ArgumentList "/S" -Wait
-          # 验证
+          $url = "https://www.python.org/ftp/python/3.8.10/python-3.8.10-amd64.exe"
+          $installer = "$env:TEMP\python-3.8.10-amd64.exe"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          Start-Process -FilePath $installer -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait
+          python --version
+
+      # ----- 安装系统工具（Tesseract OCR、poppler）-----
+      - name: 安装 Tesseract OCR（通过 Chocolatey）
+        shell: pwsh
+        run: |
+          choco install tesseract --version=5.3.3.20231005 -y
+          choco install tesseract-lang -y
           & "C:\Program Files\Tesseract-OCR\tesseract.exe" --list-langs
 
-      - name: 安装 poppler（PDF 转图片）
+      - name: 安装 poppler
         shell: pwsh
         run: |
-          # 使用 choco 安装 poppler
           choco install poppler --version=24.08.0 -y
-          # 验证
           & "C:\ProgramData\chocolatey\lib\poppler\tools\Library\bin\pdftoppm.exe" -v
 
-      - name: 准备 antiword 映射文件（你的项目自带 antiword_bin，直接抄到工作目录）
-        shell: cmd
+      # ----- 提取 UCRT 运行库（从微软 VC++ Redist）-----
+      - name: 提取 UCRT DLL（用于 Win7 离线运行）
+        shell: pwsh
         run: |
-          if not exist antiword_bin mkdir antiword_bin
-          # 如果你的 antiword_bin 不在仓库根目录，需要根据实际情况调整路径
+          $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+          $vcInstaller = "$env:TEMP\vc_redist.x64.exe"
+          Invoke-WebRequest -Uri $vcUrl -OutFile $vcInstaller
+          7z x $vcInstaller -o"$env:TEMP\vc_redist_extracted" -y
+          New-Item -ItemType Directory -Force -Path ucrt_dlls
+          Copy-Item -Path "$env:TEMP\vc_redist_extracted\ucrt\*" -Destination ucrt_dlls\ -Force
+          Copy-Item -Path "$env:TEMP\vc_redist_extracted\vc_runtimeMinimum_x64\msvcp140.dll" -Destination ucrt_dlls\ -ErrorAction SilentlyContinue
+          Copy-Item -Path "$env:TEMP\vc_redist_extracted\vc_runtimeMinimum_x64\vcruntime140.dll" -Destination ucrt_dlls\ -ErrorAction SilentlyContinue
 
-      - name: 安装 Python 依赖
+      # ----- 安装 Python 依赖 -----
+      - name: 安装 Python 包
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller xlrd olefile pytesseract pdf2image Pillow
 
-      - name: 打包 Windows 版
+      # ----- 打包 -----
+      - name: 打包 Windows 版（兼容 Win7+）
         shell: cmd
         run: |
-          :: 收集 Tesseract 及其 tessdata
           set TESSERACT_DIR=C:\Program Files\Tesseract-OCR
+          if exist tessdata rmdir /s /q tessdata
           xcopy /E /I "%TESSERACT_DIR%\tessdata" tessdata
-          :: 收集 poppler 的 bin 目录
           set POPPLER_BIN=C:\ProgramData\chocolatey\lib\poppler\tools\Library\bin
 
           pyinstaller --onefile --name FileCheckerGUI --windowed ^
-            --add-data "dictionary.txt;." ^
             --add-binary "antiword_bin\antiword.exe;antiword_bin" ^
             --add-data "antiword_bin\*.txt;antiword_bin" ^
             --add-data "antiword_bin\fontnames;antiword_bin" ^
@@ -70,28 +81,30 @@ jobs:
             --add-binary "%POPPLER_BIN%\pdftoppm.exe;." ^
             --add-binary "%POPPLER_BIN%\pdfinfo.exe;." ^
             --add-binary "%POPPLER_BIN%\pdftotext.exe;." ^
-            --add-binary "%POPPLER_BIN%\libpoppler*.dll;." ^
             --add-binary "%POPPLER_BIN%\*.dll;." ^
+            --add-binary "ucrt_dlls\*.dll;." ^
             --hidden-import tkinter ^
             file_checker_gui.py
 
       - name: 上传 Windows 产物
         uses: actions/upload-artifact@v5
         with:
-          name: FileCheckerGUI-Windows
+          name: FileCheckerGUI-Windows-Win7+
           path: dist\FileCheckerGUI.exe
 
-  # ==================== Linux x86_64 打包 ====================
+  # ============================================================
+  # Linux x86_64 打包（低 glibc）
+  # ============================================================
   build-linux-amd64:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-20.04                     # glibc 2.31
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置 Python
+      - name: 设置 Python 3.9（兼容老系统）
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.9'
 
       - name: 安装系统依赖
         run: |
@@ -119,10 +132,8 @@ jobs:
                    antiword_bin/Unicode01 antiword_bin/Unicode15 antiword_bin/Default; do
             PYI_ARGS="$PYI_ARGS --add-data $f:antiword_bin"
           done
-          # 添加 Tesseract 和 tessdata
           PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/tesseract:."
           PYI_ARGS="$PYI_ARGS --add-data /usr/share/tesseract-ocr/4.00/tessdata:tessdata"
-          # 添加 poppler 工具
           PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/pdftoppm:."
           PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/pdfinfo:."
           PYI_ARGS="$PYI_ARGS --add-binary /usr/bin/pdftotext:."
@@ -135,22 +146,21 @@ jobs:
           name: FileCheckerGUI-Linux-x86_64
           path: dist/FileCheckerGUI
 
-  # ==================== Linux ARM64 打包 ====================
+  # ============================================================
+  # Linux ARM64 打包（低 glibc，容器化构建）
+  # ============================================================
   build-linux-arm64:
     runs-on: ubuntu-22.04-arm
+    container:
+      image: debian:buster-slim              # glibc 2.28，兼容麒麟 V10
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置 Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: 安装系统依赖
+      - name: 安装系统依赖（Debian Buster）
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk antiword tesseract-ocr tesseract-ocr-chi-sim poppler-utils
+          apt-get update
+          apt-get install -y python3 python3-pip python3-tk antiword tesseract-ocr tesseract-ocr-chi-sim poppler-utils
 
       - name: 准备 antiword 映射文件
         run: |
@@ -160,8 +170,8 @@ jobs:
 
       - name: 安装 Python 依赖
         run: |
-          pip install -r requirements.txt
-          pip install pyinstaller xlrd olefile pytesseract pdf2image Pillow
+          pip3 install -r requirements.txt
+          pip3 install pyinstaller xlrd olefile pytesseract pdf2image Pillow
 
       - name: 打包 Linux ARM64 版
         run: |
