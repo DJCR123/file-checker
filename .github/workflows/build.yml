@@ -1,4 +1,4 @@
-name: Build Multi-Platform (Win7+ / Low glibc)
+name: Build Linux (Low glibc)
 
 on:
   push:
@@ -7,107 +7,17 @@ on:
 
 jobs:
   # ============================================================
-  # Windows 打包 —— 兼容 Win7/8/10/11（内置 UCRT）
-  # ============================================================
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      # ----- 安装 Python 3.8.10（最后一个官方支持 Win7 的版本）-----
-      - name: 安装 Python 3.8.10
-        shell: pwsh
-        run: |
-          $url = "https://www.python.org/ftp/python/3.8.10/python-3.8.10-amd64.exe"
-          $installer = "$env:TEMP\python-3.8.10-amd64.exe"
-          Invoke-WebRequest -Uri $url -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" -Wait
-          python --version
-
-      # ----- 安装系统工具（Tesseract OCR、poppler）-----
-      - name: 安装 Tesseract OCR（通过 Chocolatey）
-        shell: pwsh
-        run: |
-          choco install tesseract --version=5.3.3.20231005 -y
-          choco install tesseract-lang -y
-          & "C:\Program Files\Tesseract-OCR\tesseract.exe" --list-langs
-
-      - name: 安装 poppler（不指定版本，安装最新）
-        shell: pwsh
-        run: |
-          choco install poppler -y
-          # 验证：递归查找 pdftoppm.exe
-          $pdftoppm = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\poppler\tools" -Recurse -Filter pdftoppm.exe | Select-Object -First 1
-          if ($pdftoppm) { & $pdftoppm.FullName -v } else { Write-Error "pdftoppm not found" }
-
-      # ----- 提取 UCRT 运行库（从微软 VC++ Redist）-----
-      - name: 提取 UCRT DLL（用于 Win7 离线运行）
-        shell: pwsh
-        run: |
-          $vcUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
-          $vcInstaller = "$env:TEMP\vc_redist.x64.exe"
-          Invoke-WebRequest -Uri $vcUrl -OutFile $vcInstaller
-          7z x $vcInstaller -o"$env:TEMP\vc_redist_extracted" -y
-          New-Item -ItemType Directory -Force -Path ucrt_dlls
-          Copy-Item -Path "$env:TEMP\vc_redist_extracted\ucrt\*" -Destination ucrt_dlls\ -Force
-          Copy-Item -Path "$env:TEMP\vc_redist_extracted\vc_runtimeMinimum_x64\msvcp140.dll" -Destination ucrt_dlls\ -ErrorAction SilentlyContinue
-          Copy-Item -Path "$env:TEMP\vc_redist_extracted\vc_runtimeMinimum_x64\vcruntime140.dll" -Destination ucrt_dlls\ -ErrorAction SilentlyContinue
-
-      # ----- 安装 Python 依赖 -----
-      - name: 安装 Python 包
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller xlrd olefile pytesseract pdf2image Pillow
-
-      # ----- 打包 -----
-      - name: 打包 Windows 版（兼容 Win7+）
-        shell: cmd
-        run: |
-          set TESSERACT_DIR=C:\Program Files\Tesseract-OCR
-          if exist tessdata rmdir /s /q tessdata
-          xcopy /E /I "%TESSERACT_DIR%\tessdata" tessdata
-
-          :: 动态获取 poppler bin 目录（递归查找 pdftoppm.exe 所在目录）
-          for /r "C:\ProgramData\chocolatey\lib\poppler\tools" %%i in (pdftoppm.exe) do set POPPLER_BIN=%%~dpi
-
-          pyinstaller --onefile --name FileCheckerGUI --windowed ^
-            --add-binary "antiword_bin\antiword.exe;antiword_bin" ^
-            --add-data "antiword_bin\*.txt;antiword_bin" ^
-            --add-data "antiword_bin\fontnames;antiword_bin" ^
-            --add-data "antiword_bin\fontnames.rus;antiword_bin" ^
-            --add-data "antiword_bin\Unicode01;antiword_bin" ^
-            --add-data "antiword_bin\Unicode15;antiword_bin" ^
-            --add-data "antiword_bin\Default;antiword_bin" ^
-            --add-binary "%TESSERACT_DIR%\tesseract.exe;tesseract" ^
-            --add-data "tessdata;tessdata" ^
-            --add-binary "%POPPLER_BIN%pdftoppm.exe;." ^
-            --add-binary "%POPPLER_BIN%pdfinfo.exe;." ^
-            --add-binary "%POPPLER_BIN%pdftotext.exe;." ^
-            --add-binary "%POPPLER_BIN%*.dll;." ^
-            --add-binary "ucrt_dlls\*.dll;." ^
-            --hidden-import tkinter ^
-            file_checker_gui.py
-
-      - name: 上传 Windows 产物
-        uses: actions/upload-artifact@v5
-        with:
-          name: FileCheckerGUI-Windows-Win7+
-          path: dist\FileCheckerGUI.exe
-
-  # ============================================================
   # Linux x86_64 打包（低 glibc，兼容老系统）
   # ============================================================
   build-linux-amd64:
     runs-on: ubuntu-22.04
     container:
-      image: debian:buster-slim                  # glibc 2.28（满足 Node 24 要求，且兼容麒麟 V10）
+      image: debian:buster-slim                  # glibc 2.28
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 修复 Debian Buster 软件源（切换到 archive.debian.org）
+      - name: 修复 Debian Buster 软件源
         run: |
           cat > /etc/apt/sources.list <<EOF
           deb http://archive.debian.org/debian buster main contrib non-free
@@ -119,6 +29,10 @@ jobs:
           apt-get update
           apt-get install -y python3 python3-pip python3-tk antiword tesseract-ocr tesseract-ocr-chi-sim poppler-utils
 
+      - name: 升级 pip
+        run: |
+          python3 -m pip install --upgrade pip
+
       - name: 准备 antiword 映射文件
         run: |
           mkdir -p antiword_bin
@@ -127,8 +41,8 @@ jobs:
 
       - name: 安装 Python 依赖
         run: |
-          pip3 install -r requirements.txt
-          pip3 install pyinstaller xlrd olefile pytesseract pdf2image Pillow
+          python3 -m pip install -r requirements.txt
+          python3 -m pip install pyinstaller xlrd olefile pytesseract pdf2image Pillow
 
       - name: 打包 Linux x86_64 版
         run: |
@@ -160,12 +74,12 @@ jobs:
   build-linux-arm64:
     runs-on: ubuntu-22.04-arm
     container:
-      image: debian:buster-slim                  # glibc 2.28（满足 Node 24 要求，且兼容麒麟 V10）
+      image: debian:buster-slim                  # glibc 2.28
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 修复 Debian Buster 软件源（切换到 archive.debian.org）
+      - name: 修复 Debian Buster 软件源
         run: |
           cat > /etc/apt/sources.list <<EOF
           deb http://archive.debian.org/debian buster main contrib non-free
@@ -177,6 +91,10 @@ jobs:
           apt-get update
           apt-get install -y python3 python3-pip python3-tk antiword tesseract-ocr tesseract-ocr-chi-sim poppler-utils
 
+      - name: 升级 pip
+        run: |
+          python3 -m pip install --upgrade pip
+
       - name: 准备 antiword 映射文件
         run: |
           mkdir -p antiword_bin
@@ -185,8 +103,8 @@ jobs:
 
       - name: 安装 Python 依赖
         run: |
-          pip3 install -r requirements.txt
-          pip3 install pyinstaller xlrd olefile pytesseract pdf2image Pillow
+          python3 -m pip install -r requirements.txt
+          python3 -m pip install pyinstaller xlrd olefile pytesseract pdf2image Pillow
 
       - name: 打包 Linux ARM64 版
         run: |
